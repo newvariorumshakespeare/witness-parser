@@ -1,0 +1,11 @@
+[project]
+name = "witness-parser"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "ipykernel>=7.3.0",
+    "lxml>=6.1.1",
+]
