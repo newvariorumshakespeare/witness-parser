@@ -24,7 +24,7 @@ ranges (`&sigrange;`), or "all-from" expressions (`&plus;`), optionally
 preceded by `&minus;` or `&plus;` to mark the group as an exclusion or
 explicit addition.
 
-Last Update: June 16, 2026
+Last Update: June 17, 2026
 """
 
 import re
@@ -145,6 +145,122 @@ def parse_notes(notes_xml_path: str | Path, front_xml_path: str | Path) -> list[
         _parse_single_note(note_el, front_soup, witness_list, witness_dict)
         for note_el in top_level_notes
     ]
+
+
+def parse_notes_to_xml(
+    notes_xml_path: str | Path,
+    front_xml_path: str | Path,
+    replace_wit: bool = False,
+    remove_wit: bool = False,
+) -> str:
+    """Parse textual notes and return a modified XML string with witness id references.
+
+    The returned XML preserves the original note/appPart/rdg/wit structure as far as
+    possible, while adding a `witnesses` attribute to each `<appPart>` element.
+    If `replace_wit` is True, the original `<wit>` content is replaced with a new
+    `<wit>` containing one `<siglum>` child per witness that carries the reading.
+    If `remove_wit` is True, the `<wit>` element is removed entirely after the
+    `witnesses` attribute is added.
+    The attribute value is a space-separated list of `#xml:id` references for the
+    witnesses that carry the reading.
+
+    Args:
+        notes_xml_path (str | Path): Path to the TEI XML textual notes file.
+        front_xml_path (str | Path): Path to the TEI XML file containing the
+            `<listWit>` legend with witness definitions.
+        replace_wit (bool): If True, replace each original `<wit>` element with a
+            synthesized `<wit>` element containing explicit `<siglum>` entries.
+        remove_wit (bool): If True, remove the `<wit>` element entirely from each
+            `<appPart>`.
+
+    Returns:
+        str: XML string containing the modified notes document.
+    """
+    witness_list_tuples = get_witness_list(front_xml_path, show_dates=True)
+    witness_dict = dict(witness_list_tuples)
+    witness_list = [sig for sig, _ in witness_list_tuples]
+
+    # Parse the textual notes and front matter.
+    with open(notes_xml_path, "r", encoding="utf-8") as f:
+        notes_raw_text = f.read()
+        for entity_str, unicode_char in XML_ENTITY_MAP.items():
+            notes_raw_text = notes_raw_text.replace(entity_str, unicode_char)
+        notes_soup = BeautifulSoup(notes_raw_text, "lxml-xml")
+
+    with open(front_xml_path, "r", encoding="utf-8") as f:
+        front_soup = BeautifulSoup(f, "lxml-xml")
+
+    witness_id_map = _build_witness_id_map(front_soup)
+
+    for note_el in notes_soup.find_all("note"):
+        for app_part in note_el.find_all("appPart"):
+            wit_el = app_part.find("wit")
+            if wit_el is None:
+                continue
+
+            witness_sigla = _resolve_witness_sigla_for_ids(
+                wit_el, front_soup, witness_list, witness_dict
+            )
+            if not witness_sigla:
+                continue
+
+            witness_refs = []
+            for sig in witness_sigla:
+                xml_id = witness_id_map.get(sig)
+                witness_refs.append(f"#{xml_id}" if xml_id else sig)
+
+            app_part["witnesses"] = " ".join(witness_refs)
+
+            if not remove_wit and replace_wit:
+                new_wit = notes_soup.new_tag("wit", **wit_el.attrs)
+                for index, sig in enumerate(witness_sigla):
+                    siglum_el = notes_soup.new_tag("siglum")
+                    siglum_el.string = sig
+                    new_wit.append(siglum_el)
+                    if index < len(witness_sigla) - 1:
+                        new_wit.append(", ")
+                wit_el.replace_with(new_wit)
+            elif remove_wit:
+                wit_el.decompose()
+
+    # Preserve the full modified document if possible, otherwise emit the note elements.
+    return str(notes_soup)
+
+
+def _build_witness_id_map(root: BeautifulSoup) -> dict[str, str]:
+    """Build a siglum-to-xml:id mapping from `<listWit>` witness definitions."""
+    witness_id_map: dict[str, str] = {}
+    for list_wit in root.find_all("listWit"):
+        for witness_el in list_wit.find_all("witness"):
+            siglum_el = witness_el.find("siglum")
+            if siglum_el is not None:
+                siglum = siglum_el.get_text(strip=True)
+            else:
+                siglum = witness_el.get_text(strip=True)
+
+            if not siglum:
+                continue
+
+            xml_id = witness_el.get("xml:id") or witness_el.get("id")
+            if xml_id:
+                witness_id_map[siglum] = xml_id
+
+    return witness_id_map
+
+
+def _resolve_witness_sigla_for_ids(
+    wit_el: Tag,
+    front_soup: BeautifulSoup,
+    witness_list: list[str],
+    witness_dict: dict[str, str],
+) -> list[str]:
+    """Resolve the list of witness sigla for an `<appPart>` without inline-note annotations."""
+    witnesses = parse_witness_formula(wit_el, witness_list)
+    witnesses = _expand_collective_sigla(witnesses, front_soup, witness_list)
+    witnesses_tuples = smart_date_sorted(
+        [(sig, witness_dict.get(sig, "0")) for sig in witnesses]
+    )
+    return [sig for sig, _ in witnesses_tuples]
 
 
 def parse_witness_formula(
